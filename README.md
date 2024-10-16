@@ -5,6 +5,8 @@ A pipeline that implements **[Chain-of-Thought (CoT) Decoding](https://arxiv.org
 
 ## Description
 
+Waiting on Ollama team to impelent [logprobs](https://github.com/ollama/ollama/pull/1640) passthrough to have a working version
+
 This pipeline leverages the Ollama API to perform Chain-of-Thought decoding, which involves:
 
 - **Extracting alternative top-𝑘 decoding paths.**
@@ -132,7 +134,7 @@ Confidence: 0.000025
 
 - **Confidence Metric**:
 
-  - The current confidence calculation is simplified.
+  - The current confidence calculation is simplified. Waiting on Ollama team to impelent [logprobs](https://github.com/ollama/ollama/pull/1640) passthrough to have a fully working version
   - For more accurate confidence metrics, consider implementing a method based on token probabilities if available from the API.
 
 - **Debugging**:
