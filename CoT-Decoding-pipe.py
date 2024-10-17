@@ -1,14 +1,14 @@
 """
-title: CoT-Decoding Pipeline
+title: CoT-Decoding Pipeline with Self-Evaluation
 author: latent-variable
 date: 2024-10-15
-version: 1.2
+version: 1.6
 license: MIT
-description: A pipeline that implements Chain-of-Thought decoding using the Ollama API.
+description: A pipeline that implements Chain-of-Thought decoding using the Ollama API, with self-evaluation and conversation history tracking using messages.
 requirements: requests
 """
 
-from typing import List, Union, Generator, Iterator
+from typing import List, Union, Generator, Iterator, Optional
 import os
 import requests
 import random
@@ -18,25 +18,28 @@ class Pipeline:
     class Valves(BaseModel):
         pipelines: List[str] = []
         priority: int = 0
-        ollama_api_url: str = "http://localhost:11434/api/generate"
+        ollama_api_url: str = "http://localhost:11434/api/chat"
         model: str = ''
-        k: int = 10  # Number of top-k alternatives to consider
+        k: int = 5  # Number of top-k alternatives to consider
         temperature: float = 0.7  # Temperature for sampling
         max_tokens: int = 256  # Maximum tokens to generate
+        evaluation_temperature: float = 0.5  # Temperature for the evaluation step
+        evaluation_max_tokens: int = 512  # Max tokens for the evaluation response
         debug: bool = True  # Enable debugging output
 
     def __init__(self):
-        # self.type = "filter"
-        self.name = "CoT-Decoding Pipeline"
+        self.name = "CoT-Decoding Pipeline with Self-Evaluation"
         self.valves = self.Valves(
             **{
                 "pipelines": ["*"],  # Connect to all pipelines
                 "priority": 0,
-                "ollama_api_url": os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate"),
+                "ollama_api_url": os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat"),
                 "model": '',
-                "k": int(os.getenv("COT_DECODING_K", "10")),
+                "k": int(os.getenv("COT_DECODING_K", "5")),
                 "temperature": float(os.getenv("COT_DECODING_TEMPERATURE", "0.7")),
                 "max_tokens": int(os.getenv("COT_DECODING_MAX_TOKENS", "256")),
+                "evaluation_temperature": float(os.getenv("EVALUATION_TEMPERATURE", "0.5")),
+                "evaluation_max_tokens": int(os.getenv("EVALUATION_MAX_TOKENS", "512")),
                 "debug": os.getenv("COT_DECODING_DEBUG", "True") == "True",
             }
         )
@@ -48,129 +51,153 @@ class Pipeline:
         print(f"on_shutdown: {self.name}")
 
     async def on_valves_updated(self):
-        # This method can be used to update any configurations if valves are changed
         pass
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
-        # Implement the CoT-Decoding logic here using the 'pipe' method
+        if not self.valves.model:
+            return f"Please select a model to use with this pipeline {model_id}"
 
-        # Format the prompt from the messages in standard QA format
-        prompt = self.format_prompt(messages)
+        # Use messages directly
+        conversation_history = messages.copy()
 
         if self.valves.debug:
-            print("Formatted Prompt:")
-            print(prompt)
+            print("Conversation History:")
+            for msg in conversation_history:
+                print(f"{msg['role'].capitalize()}: {msg['content']}")
 
-        # Get top-k alternative responses using parameters from valves
+        # Get top-k alternative responses for the last user message
+        last_user_message = self.get_last_user_message(conversation_history)
+        if not last_user_message:
+            return "No user message found."
+
         top_k_responses = self.get_top_k_responses(
-            self.valves.model,
-            prompt,
+            self.valves.model or model_id,
+            conversation_history,
             self.valves.k,
             self.valves.temperature,
             self.valves.max_tokens,
             self.valves.ollama_api_url
         )
-        if self.valves.debug:
-            print("\nGenerated Responses and Confidence Scores:")
-            for idx, response in enumerate(top_k_responses):
-                print(f"Response {idx + 1}:")
-                print(f"Content: {response['response']}")
-                print(f"Confidence: {response.get('confidence', 'Not calculated')}\n")
 
-        # Select the best response based on confidence
-        best_response = self.select_best_response(top_k_responses)
         if self.valves.debug:
-            print("Selected Best Response:")
-            print(f"Content: {best_response['response']}")
-            print(f"Confidence: {best_response.get('confidence', 'Not calculated')}")
+            print("\nGenerated Responses:")
+            for idx, response in enumerate(top_k_responses):
+                print(f"Response {idx + 1}: {response['content']}\n")
+
+        # Use the model to select or generate the best response
+        best_response, inner_monologue = self.select_best_response_with_model(
+            self.valves.model or model_id,
+            conversation_history,
+            top_k_responses,
+            self.valves.evaluation_temperature,
+            self.valves.evaluation_max_tokens,
+            self.valves.ollama_api_url
+        )
+
+        if self.valves.debug:
+            print("\nInner Monologue:")
+            print(inner_monologue)
+            print("\nSelected Best Response:")
+            print(best_response)
 
         if best_response:
-            # For debugging purposes, you might want to return all the responses and debug info
-            # However, since the pipe function is expected to return a string, we can include the debug info in the return value
             if self.valves.debug:
-                debug_info = "\n\n--- Debug Info ---\n"
-                for idx, response in enumerate(top_k_responses):
-                    debug_info += f"Response {idx + 1}:\n"
-                    debug_info += f"Content: {response['response']}\n"
-                    debug_info += f"Confidence: {response.get('confidence', 'Not calculated')}\n\n"
-                debug_info += f"Selected Response:\nContent: {best_response['response']}\nConfidence: {best_response.get('confidence', 'Not calculated')}\n"
-                return best_response["response"] + debug_info
+                # Include the inner monologue before the final response
+                return f"--- Inner Monologue ---\n{inner_monologue}\n\n--- Final Response ---\n{best_response}"
             else:
-                return best_response["response"]
+                return best_response
         else:
             return "I'm sorry, but I couldn't generate a response."
 
-    def format_prompt(self, messages: List[dict]) -> str:
-        # Convert the messages into a single prompt string
-        prompt = ""
-        for message in messages:
-            role = message.get("role")
-            content = message.get("content")
-            if role == "user":
-                prompt += f"Q: {content}\nA:"
-            elif role == "assistant":
-                # Optionally include assistant's previous responses
-                prompt += f"{content}\n"
-        return prompt.strip()
+    def get_last_user_message(self, messages: List[dict]) -> Optional[dict]:
+        for msg in reversed(messages):
+            if msg['role'] == 'user':
+                return msg
+        return None
 
     def get_top_k_responses(
-        self, model: str, prompt: str, k: int, temperature: float, max_tokens: int, api_url: str, 
+        self, model: str, messages: List[dict], k: int, temperature: float, max_tokens: int, api_url: str
     ) -> List[dict]:
-        # Use the Ollama API to get top-k alternative decoding paths  
         responses = []
         for i in range(k):
-            seed = random.randint(0, 1e6)
+            seed = random.randint(0, int(1e6))
+            # Prepare the messages for this generation
+            messages_for_generation = messages.copy()
+            # Remove the assistant's last response if any
+            while messages_for_generation and messages_for_generation[-1]['role'] == 'assistant':
+                messages_for_generation.pop()
+
             params = {
                 "model": model,
-                "prompt": prompt,
+                "messages": messages_for_generation,
                 "options": {
                     "seed": seed,
                     "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "top_k": k,
-                    "stream": False
+                    "max_tokens": max_tokens
                 },
                 "stream": False
             }
             response = requests.post(api_url, json=params)
             if response.status_code == 200:
                 data = response.json()
-                response_text = data.get("response", "")
+                assistant_message = data.get("message", {})
+                response_text = assistant_message.get("content", "").strip()
                 if response_text:
-                    response_info = {
-                        "response": response_text,
-                        "info": data
-                    }
-                    # Calculate confidence here to include in debug output
-                    confidence = self.calculate_confidence(response_info)
-                    response_info["confidence"] = confidence
-                    responses.append(response_info)
+                    responses.append({
+                        "content": response_text
+                    })
             else:
                 print(f"Error in API call: {response.status_code} - {response.text}")
         return responses
 
-    def select_best_response(self, responses: List[dict]) -> dict:
-        # Calculate confidence metrics for each response and select the most reliable one
-        best_response = None
-        highest_confidence = -1
-        for response in responses:
-            confidence = response.get("confidence", 0)
-            if confidence > highest_confidence:
-                highest_confidence = confidence
-                best_response = response
-        return best_response
+    def select_best_response_with_model(
+        self, model: str, messages: List[dict], responses: List[dict],
+        temperature: float, max_tokens: int, api_url: str
+    ) -> (Optional[str], Optional[str]):
+        # Prepare the evaluation messages
+        evaluation_messages = messages.copy()
+        # Remove the assistant's last response if any
+        while evaluation_messages and evaluation_messages[-1]['role'] == 'assistant':
+            evaluation_messages.pop()
 
-    def calculate_confidence(self, response: dict) -> float:
-        # Implement confidence calculation based on token probabilities
-        # For this example, we'll use a simplified confidence metric
+        # Compile the possible responses into a string
+        possible_responses_text = "I have considered the following possible responses:\n"
+        for idx, response in enumerate(responses, 1):
+            possible_responses_text += f"[{idx}] {response['content']}\n"
+        possible_responses_text += (
+            "\nPlease provide the best possible response to the last user message based on the options above."
+            "\nDo not mention the options or this instruction in your final answer."
+        )
 
-        # Retrieve eval_count and eval_duration from the response info
-        eval_count = response["info"].get("eval_count", 0)
-        eval_duration = response["info"].get("eval_duration", 1)  # Avoid division by zero
+        # Add the possible responses and instructions as a 'user' message
+        evaluation_messages.append({
+            "role": "user",
+            "content": possible_responses_text
+        })
 
-        # Confidence metric: tokens per second
-        confidence = eval_count / eval_duration
+        if self.valves.debug:
+            print("\nEvaluation Messages:")
+            for msg in evaluation_messages:
+                print(f"{msg['role'].capitalize()}: {msg['content']}")
 
-        return confidence
+        # Call the model with the evaluation messages
+        params = {
+            "model": model,
+            "messages": evaluation_messages,
+            "options": {
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            },
+            "stream": False
+        }
+        response = requests.post(api_url, json=params)
+        if response.status_code == 200:
+            data = response.json()
+            assistant_message = data.get("message", {})
+            final_response = assistant_message.get("content", "").strip()
+            return final_response, possible_responses_text
+        else:
+            print(f"Error in evaluation API call: {response.status_code} - {response.text}")
+            return None, None
