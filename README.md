@@ -5,7 +5,8 @@ A pipeline that implements **[Chain-of-Thought (CoT) Decoding](https://arxiv.org
 
 ## Description
 
-Waiting on Ollama team to impelent [logprobs](https://github.com/ollama/ollama/pull/1640) passthrough to have a working version
+Waiting on Ollama team to impelent [logprobs](https://github.com/ollama/ollama/pull/1640) to have an original implementation. 
+Currently this will prompt the model to use the options as an inner monologue. 
 
 This pipeline leverages the Ollama API to perform Chain-of-Thought decoding, which involves:
 
